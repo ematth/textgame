@@ -45,8 +45,8 @@ window.addEventListener('resize', () => {
 let lastTs = performance.now()
 let lastOx = camera.ox
 let lastOy = camera.oy
-let lastCols = grid.cols
-let lastRows = grid.rows
+let lastCols = -1
+let lastRows = -1
 
 const npcList = entities.list.filter((e) => e.kind === 'npc')
 const fireList = entities.list.filter((e) => e.kind === 'object' && e.char === '*')

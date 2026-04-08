@@ -21,7 +21,7 @@ export function drawHud(ctx, canvasW, canvasH, player, dialogText, showInteractP
   ctx.font = HUD_FONT
   ctx.textBaseline = 'top'
 
-  ctx.fillStyle = 'rgba(0,0,0,0.55)'
+  ctx.fillStyle = '#0f172a'
   ctx.fillRect(0, 0, canvasW, 32)
   ctx.fillStyle = '#e2e8f0'
   ctx.fillText(`Wildlands    (${player.x}, ${player.y})`, 10, 9)
