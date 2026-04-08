@@ -1,7 +1,7 @@
 import { TILE, getTileDef } from './tiles.js'
 
-const W = 200
-const H = 200
+const W = 300
+const H = 300
 
 function noise2(x, y) {
   const s = Math.sin(x * 12.9898 + y * 78.233) * 43758.5453

@@ -3,42 +3,56 @@ import { prepareWithSegments, walkLineRanges } from '@chenglou/pretext'
 
 const FONT_FAMILY = '"Courier New", monospace'
 const FONT_SIZE = 16
+const MIN_ZOOM = 1
+const MAX_ZOOM = 5
 
+let baseCellW = 10
+let baseCellH = 18
 let cellW = 10
 let cellH = 18
 let cellWMeasured = false
+let zoomLevel = 1
 /** @type {ReturnType<typeof prepareWithSegments> | null} */
 let preparedCellM = null
-
-const worldStatic = document.createElement('canvas')
-const worldStaticCtx = worldStatic.getContext('2d', { alpha: false })
-if (!worldStaticCtx) throw new Error('offscreen 2d context')
-
-let worldStaticValid = false
-let worldStaticWorldW = -1
-let worldStaticWorldH = -1
-let worldStaticCellW = -1
-let worldStaticCellH = -1
 
 export function getCellSize() {
   return { cellW, cellH }
 }
 
+export function getZoom() {
+  return zoomLevel
+}
+
+export function setZoom(level) {
+  const clamped = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, Math.round(level)))
+  if (clamped === zoomLevel) return false
+  zoomLevel = clamped
+  cellW = baseCellW * zoomLevel
+  cellH = baseCellH * zoomLevel
+  return true
+}
+
 export function getFontString() {
+  return `${FONT_SIZE * zoomLevel}px ${FONT_FAMILY}`
+}
+
+function getBaseFontString() {
   return `${FONT_SIZE}px ${FONT_FAMILY}`
 }
 
 export function measureCell() {
   if (!cellWMeasured) {
-    preparedCellM ??= prepareWithSegments('M', getFontString())
+    preparedCellM ??= prepareWithSegments('M', getBaseFontString())
     let maxW = 0
     walkLineRanges(preparedCellM, Number.POSITIVE_INFINITY, (line) => {
       if (line.width > maxW) maxW = line.width
     })
-    cellW = Math.max(1, Math.ceil(maxW))
-    cellH = Math.ceil(FONT_SIZE * 1.15)
+    baseCellW = Math.max(1, Math.ceil(maxW))
+    baseCellH = Math.ceil(FONT_SIZE * 1.15)
     cellWMeasured = true
   }
+  cellW = baseCellW * zoomLevel
+  cellH = baseCellH * zoomLevel
   return { cellW, cellH }
 }
 
@@ -56,66 +70,54 @@ export function resizeCanvas(canvas, existingCtx) {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
 
   measureCell()
-  worldStaticValid = false
   return { width: w, height: h, ctx }
 }
 
 export function getGridDimensions(canvasWidth, canvasHeight) {
-  const cols = Math.max(1, Math.floor(canvasWidth / cellW))
-  const rows = Math.max(1, Math.floor(canvasHeight / cellH))
+  const cols = Math.max(1, Math.ceil(canvasWidth / cellW))
+  const rows = Math.max(1, Math.ceil(canvasHeight / cellH))
   return { cols, rows }
 }
 
-function ensureWorldStatic(world) {
-  if (
-    worldStaticValid &&
-    worldStaticWorldW === world.width &&
-    worldStaticWorldH === world.height &&
-    worldStaticCellW === cellW &&
-    worldStaticCellH === cellH
-  ) {
-    return
-  }
+const VOID_TILE = { char: '▲', fg: '#8a8a8a', bg: '#2a2a2a' }
 
-  worldStaticWorldW = world.width
-  worldStaticWorldH = world.height
-  worldStaticCellW = cellW
-  worldStaticCellH = cellH
-  worldStaticValid = true
+export function drawBackgroundViewport(ctx, world, camera, viewCols, viewRows) {
+  ctx.font = getFontString()
+  ctx.textBaseline = 'top'
 
-  worldStatic.width = world.width * cellW
-  worldStatic.height = world.height * cellH
-  worldStaticCtx.font = getFontString()
-  worldStaticCtx.textBaseline = 'top'
-
+  const { ox, oy } = camera
   const W = world.width
+  const H = world.height
   const tiles = world.tiles
 
-  for (let y = 0; y < world.height; y++) {
-    const yPx = y * cellH
+  for (let vr = 0; vr < viewRows; vr++) {
+    const wy = oy + vr
+    const yPx = vr * cellH
 
     let runFg = '#000000'
     let runBg = '#000000'
-    let runStartX = 0
+    let runStartVC = 0
     let runLen = 0
     let runHasInk = false
     let runChars = []
 
     const flushRun = () => {
       if (runLen <= 0) return
-      worldStaticCtx.fillStyle = runBg
-      worldStaticCtx.fillRect(runStartX * cellW, yPx, runLen * cellW, cellH)
+      ctx.fillStyle = runBg
+      ctx.fillRect(runStartVC * cellW, yPx, runLen * cellW, cellH)
       if (runHasInk) {
-        worldStaticCtx.fillStyle = runFg
-        worldStaticCtx.fillText(runChars.join(''), runStartX * cellW, yPx)
+        ctx.fillStyle = runFg
+        ctx.fillText(runChars.join(''), runStartVC * cellW, yPx)
       }
       runLen = 0
       runHasInk = false
       runChars = []
     }
 
-    for (let x = 0; x < world.width; x++) {
-      const td = TILE_DEFS[tiles[y * W + x]] ?? TILE_DEFS[0]
+    for (let vc = 0; vc < viewCols; vc++) {
+      const wx = ox + vc
+      const oob = wx < 0 || wx >= W || wy < 0 || wy >= H
+      const td = oob ? VOID_TILE : (TILE_DEFS[tiles[wy * W + wx]] ?? TILE_DEFS[0])
       const fg = td.fg
       const bg = td.bg
       const ch = td.char
@@ -123,7 +125,7 @@ function ensureWorldStatic(world) {
       if (runLen === 0) {
         runFg = fg
         runBg = bg
-        runStartX = x
+        runStartVC = vc
         runLen = 1
         runHasInk = ch !== ' '
         runChars.push(ch)
@@ -135,7 +137,7 @@ function ensureWorldStatic(world) {
         flushRun()
         runFg = fg
         runBg = bg
-        runStartX = x
+        runStartVC = vc
         runLen = 1
         runHasInk = ch !== ' '
         runChars.push(ch)
@@ -144,15 +146,6 @@ function ensureWorldStatic(world) {
 
     flushRun()
   }
-}
-
-export function drawBackgroundViewport(ctx, world, camera, viewCols, viewRows) {
-  ensureWorldStatic(world)
-  const sx = camera.ox * cellW
-  const sy = camera.oy * cellH
-  const sw = viewCols * cellW
-  const sh = viewRows * cellH
-  ctx.drawImage(worldStatic, sx, sy, sw, sh, 0, 0, sw, sh)
 }
 
 function drawObjectCell(ctx, obj, td, vc, vr, time) {
@@ -209,13 +202,24 @@ function findEntityAt(entities, wx, wy) {
   return { npc, obj }
 }
 
+function drawTileCell(ctx, world, wx, wy, vc, vr) {
+  const td = TILE_DEFS[world.tiles[wy * world.width + wx]] ?? TILE_DEFS[0]
+  const xPx = vc * cellW
+  const yPx = vr * cellH
+  ctx.fillStyle = td.bg
+  ctx.fillRect(xPx, yPx, cellW, cellH)
+  if (td.char !== ' ') {
+    ctx.fillStyle = td.fg
+    ctx.fillText(td.char, xPx, yPx)
+  }
+}
+
 export function drawOverlayDirty(ctx, world, camera, entities, player, time, dirtyWorldCells, viewCols, viewRows) {
   ctx.font = getFontString()
   ctx.textBaseline = 'top'
 
   const { ox, oy } = camera
   const playerFg = '#f8fafc'
-  ensureWorldStatic(world)
 
   for (let i = 0; i < dirtyWorldCells.length; i++) {
     const { wx, wy } = dirtyWorldCells[i]
@@ -223,9 +227,7 @@ export function drawOverlayDirty(ctx, world, camera, entities, player, time, dir
     const vr = wy - oy
     if (vc < 0 || vc >= viewCols || vr < 0 || vr >= viewRows) continue
 
-    const sx = wx * cellW
-    const sy = wy * cellH
-    ctx.drawImage(worldStatic, sx, sy, cellW, cellH, vc * cellW, vr * cellH, cellW, cellH)
+    drawTileCell(ctx, world, wx, wy, vc, vr)
 
     const { npc, obj } = findEntityAt(entities, wx, wy)
 

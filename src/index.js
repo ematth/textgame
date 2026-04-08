@@ -1,4 +1,4 @@
-import { initInput, getDirection, consumeSpacePress, isSpaceDown } from './input.js'
+import { initInput, getDirection, consumeSpacePress, isSpaceDown, consumeZoomDelta } from './input.js'
 import { generateWorld } from './world.js'
 import { createPlayer, tryMovePlayer } from './player.js'
 import { computeCameraOrigin } from './camera.js'
@@ -6,6 +6,8 @@ import { createEntities, updateEntities, entityBlocksTile, findInteractTarget } 
 import {
   resizeCanvas,
   getGridDimensions,
+  getZoom,
+  setZoom,
   drawBackgroundViewport,
   drawOverlayFull,
   drawOverlayDirty,
@@ -73,9 +75,7 @@ function frame(now) {
   }
 
   if (dialogText) {
-    // If the player holds Space, the keydown was already consumed by opening the dialog.
-    // Allow dismissal on held Space after a small debounce to prevent instant close.
-    if ((consumeSpacePress() || isSpaceDown()) && now - dialogOpenedAt > 150) {
+    if (now - dialogOpenedAt > 150 && (consumeSpacePress() || isSpaceDown())) {
       dialogText = null
     }
   } else {
@@ -97,11 +97,20 @@ function frame(now) {
     }
   }
 
+  const zd = consumeZoomDelta()
+  let zoomChanged = false
+  if (zd !== 0) {
+    zoomChanged = setZoom(getZoom() + zd)
+    if (zoomChanged) {
+      grid = getGridDimensions(view.width, view.height)
+    }
+  }
+
   updateEntities(entities, world, player.x, player.y, dt, now)
 
   camera = computeCameraOrigin(player.x, player.y, world.width, world.height, grid.cols, grid.rows)
 
-  const cameraChanged = camera.ox !== prevOx || camera.oy !== prevOy || grid.cols !== lastCols || grid.rows !== lastRows
+  const cameraChanged = zoomChanged || camera.ox !== prevOx || camera.oy !== prevOy || grid.cols !== lastCols || grid.rows !== lastRows
 
   if (cameraChanged) {
     ctx.fillStyle = '#000000'
