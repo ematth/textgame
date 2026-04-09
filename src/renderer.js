@@ -1,5 +1,6 @@
 import { TILE_DEFS } from './tiles.js'
 import { prepareWithSegments, walkLineRanges } from '@chenglou/pretext'
+import { getNightDarkness } from './worldClock.js'
 
 const FONT_FAMILY = '"Courier New", monospace'
 const FONT_SIZE = 16
@@ -182,8 +183,12 @@ export function drawOverlayFull(ctx, world, camera, player, time, viewCols, view
     const td = TILE_DEFS[world.tiles[e.y * world.width + e.x]] ?? TILE_DEFS[0]
 
     if (e.kind === 'npc') {
-      ctx.fillStyle = e.fg
+      ctx.fillStyle = e.combatState ? '#ff4444' : e.fg
       ctx.fillText(e.char, vc * cellW, vr * cellH)
+      if (e.emote && vr > 0) {
+        ctx.fillStyle = '#ffd700'
+        ctx.fillText(e.emote, vc * cellW, (vr - 1) * cellH)
+      }
     } else {
       drawObjectCell(ctx, e, td, vc, vr, time)
     }
@@ -224,6 +229,12 @@ export function drawOverlayDirty(ctx, world, camera, player, time, dirtyWorldCel
 
     drawTileCell(ctx, world, wx, wy, vc, vr)
 
+    const dark = getNightDarkness()
+    if (dark > 0) {
+      ctx.fillStyle = `rgba(0, 0, 15, ${dark})`
+      ctx.fillRect(vc * cellW, vr * cellH, cellW, cellH)
+    }
+
     // Use spatial hash for entity lookup at this tile
     const atTile = world.spatialHash ? world.spatialHash.getAt(wx, wy) : []
     let npc = null
@@ -238,12 +249,27 @@ export function drawOverlayDirty(ctx, world, camera, player, time, dirtyWorldCel
       drawObjectCell(ctx, obj, td, vc, vr, time)
     }
     if (npc) {
-      ctx.fillStyle = npc.fg
+      ctx.fillStyle = npc.combatState ? '#ff4444' : npc.fg
       ctx.fillText(npc.char, vc * cellW, vr * cellH)
+      if (npc.emote && vr > 0) {
+        ctx.fillStyle = '#ffd700'
+        ctx.fillText(npc.emote, vc * cellW, (vr - 1) * cellH)
+      }
     }
     if (player.x === wx && player.y === wy) {
       ctx.fillStyle = playerFg
       ctx.fillText('@', vc * cellW, vr * cellH)
     }
   }
+}
+
+export function drawNightOverlay(ctx, canvasW, canvasH) {
+  const dark = getNightDarkness()
+  if (dark <= 0) return
+  ctx.fillStyle = `rgba(0, 0, 15, ${dark})`
+  ctx.fillRect(0, 0, canvasW, canvasH)
+}
+
+export function currentNightDarkness() {
+  return getNightDarkness()
 }

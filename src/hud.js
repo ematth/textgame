@@ -17,15 +17,16 @@ let lastLines = null
  * @param {string} worldName
  * @param {string | null} dialogText
  * @param {boolean} showInteractPrompt
+ * @param {string} timeStr
  */
-export function drawHud(ctx, canvasW, canvasH, player, worldName, dialogText, showInteractPrompt) {
+export function drawHud(ctx, canvasW, canvasH, player, worldName, dialogText, showInteractPrompt, timeStr) {
   ctx.font = HUD_FONT
   ctx.textBaseline = 'top'
 
   ctx.fillStyle = '#0f172a'
   ctx.fillRect(0, 0, canvasW, 32)
   ctx.fillStyle = '#e2e8f0'
-  ctx.fillText(`${worldName}    (${player.x}, ${player.y})`, 10, 9)
+  ctx.fillText(`${worldName}  ${timeStr || ''}  (${player.x}, ${player.y})`, 10, 9)
 
   if (showInteractPrompt && !dialogText) {
     ctx.fillStyle = 'rgba(0,0,0,0.5)'
@@ -51,7 +52,7 @@ export function drawHud(ctx, canvasW, canvasH, player, worldName, dialogText, sh
   if (!lastPrepared) return
 
   const pad = 16
-  const boxH = 132
+  const boxH = 180
   const boxY = canvasH - boxH - pad
   const boxW = canvasW - pad * 2
 
@@ -62,7 +63,7 @@ export function drawHud(ctx, canvasW, canvasH, player, worldName, dialogText, sh
     lastLines = lines
   }
 
-  ctx.fillStyle = 'rgba(15, 23, 42, 0.9)'
+  ctx.fillStyle = 'rgba(15, 23, 42, 0.92)'
   ctx.fillRect(pad, boxY, boxW, boxH)
   ctx.strokeStyle = '#475569'
   ctx.strokeRect(pad + 0.5, boxY + 0.5, boxW - 1, boxH - 1)
@@ -71,7 +72,9 @@ export function drawHud(ctx, canvasW, canvasH, player, worldName, dialogText, sh
   ctx.font = HUD_FONT
   let ty = boxY + 14
   const textX = pad + 14
+  const maxY = boxY + boxH - 32
   for (const line of lastLines ?? []) {
+    if (ty > maxY) break
     ctx.fillText(line.text, textX, ty)
     ty += LINE_H
   }

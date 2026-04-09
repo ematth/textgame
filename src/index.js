@@ -11,6 +11,8 @@ import {
   drawBackgroundViewport,
   drawOverlayFull,
   drawOverlayDirty,
+  drawNightOverlay,
+  currentNightDarkness,
 } from './renderer.js'
 import { drawHud } from './hud.js'
 import { createWorldManager } from './worldManager.js'
@@ -18,6 +20,9 @@ import { buildSpatialHash } from './spatialHash.js'
 import { generateAllInteriors } from './interiors.js'
 import { populateNPCs } from './npcFactory.js'
 import { drawLoadingScreen, yieldFrame } from './loading.js'
+import { DamageQueue } from './combat.js'
+import { tickClock, getTimeString, getPhase } from './worldClock.js'
+import { MEMORY_DIALOG } from './npcData.js'
 
 const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById('game'))
 if (!canvas) throw new Error('#game canvas missing')
@@ -63,7 +68,6 @@ async function boot() {
   show('Summoning citizens...', 0.75)
   await yieldFrame()
 
-  // Build spatial hashes for all worlds
   show('Indexing the realm...', 0.8)
   await yieldFrame()
 
@@ -74,7 +78,6 @@ async function boot() {
   show('The gates are open.', 1.0)
   await yieldFrame()
 
-  // Small delay so user sees "100%"
   await new Promise((r) => setTimeout(r, 300))
 
   startGame(worldManager, overworld, view)
@@ -87,6 +90,8 @@ function startGame(worldManager, overworld, initialView) {
 
   initInput()
 
+  const damageQueue = new DamageQueue()
+
   let view = initialView
   let grid = getGridDimensions(view.width, view.height)
   let camera = computeCameraOrigin(player.x, player.y, overworld.width, overworld.height, grid.cols, grid.rows)
@@ -94,6 +99,8 @@ function startGame(worldManager, overworld, initialView) {
   /** @type {string | null} */
   let dialogText = null
   let dialogOpenedAt = 0
+  /** @type {any} NPC currently in conversation with the player */
+  let dialogTarget = null
   let forceFullRedraw = true
 
   window.addEventListener('resize', () => {
@@ -107,6 +114,7 @@ function startGame(worldManager, overworld, initialView) {
   let lastOy = camera.oy
   let lastCols = -1
   let lastRows = -1
+  let lastDarkness = currentNightDarkness()
 
   function addDirtyCell(dirtySet, wx, wy, world) {
     if (wx < 0 || wx >= world.width || wy < 0 || wy >= world.height) return
@@ -117,6 +125,8 @@ function startGame(worldManager, overworld, initialView) {
     const dt = Math.min(50, now - lastTs)
     lastTs = now
 
+    tickClock(dt)
+
     const activeWorld = worldManager.getActiveWorld()
     if (!activeWorld) { requestAnimationFrame(frame); return }
 
@@ -126,7 +136,6 @@ function startGame(worldManager, overworld, initialView) {
     const playerOldX = player.x
     const playerOldY = player.y
 
-    // Snapshot visible NPC positions for dirty tracking (via spatial hash)
     const visibleNpcs = activeWorld.spatialHash
       ? activeWorld.spatialHash.getInRect(
         camera.ox - 2, camera.oy - 2,
@@ -134,11 +143,16 @@ function startGame(worldManager, overworld, initialView) {
       ).filter((e) => e.kind === 'npc')
       : []
 
-    const npcSnap = visibleNpcs.map((e) => ({ e, ox: e.x, oy: e.y }))
+    const npcSnap = visibleNpcs.map((e) => ({ e, ox: e.x, oy: e.y, hadEmote: !!e.emote }))
 
     if (dialogText) {
       if (now - dialogOpenedAt > 150 && (consumeSpacePress() || isSpaceDown())) {
         dialogText = null
+        if (dialogTarget) {
+          dialogTarget.talkingToPlayer = false
+          dialogTarget = null
+        }
+        forceFullRedraw = true
       }
     } else {
       const dir = getDirection()
@@ -150,7 +164,6 @@ function startGame(worldManager, overworld, initialView) {
         now,
       )
 
-      // Check portal after movement
       if (player.x !== playerOldX || player.y !== playerOldY) {
         const portal = worldManager.checkPortal(activeWorld.id, player.x, player.y)
         if (portal) {
@@ -163,10 +176,12 @@ function startGame(worldManager, overworld, initialView) {
         const curWorld = worldManager.getActiveWorld()
         const target = findInteractTarget(curWorld, player.x, player.y)
         if (target) {
-          dialogText = target.kind === 'npc'
-            ? `${target.name} (${target.race} ${target.role}):\n${target.dialog}`
-            : `${target.label}:\n${target.dialog}`
+          dialogText = buildDialogText(target, now)
           dialogOpenedAt = now
+          if (target.kind === 'npc') {
+            target.talkingToPlayer = true
+            dialogTarget = target
+          }
         }
       }
     }
@@ -181,11 +196,15 @@ function startGame(worldManager, overworld, initialView) {
     }
 
     const curWorld = worldManager.getActiveWorld()
-    updateEntities(curWorld, player.x, player.y, dt, now)
+    updateEntities(curWorld, player.x, player.y, dt, now, damageQueue, worldManager)
+    damageQueue.processAll(now)
 
     camera = computeCameraOrigin(player.x, player.y, curWorld.width, curWorld.height, grid.cols, grid.rows)
 
-    const cameraChanged = forceFullRedraw || zoomChanged ||
+    const nowDarkness = currentNightDarkness()
+    const darknessShifted = Math.abs(nowDarkness - lastDarkness) > 0.005
+
+    const cameraChanged = forceFullRedraw || zoomChanged || darknessShifted ||
       camera.ox !== prevOx || camera.oy !== prevOy ||
       grid.cols !== lastCols || grid.rows !== lastRows
 
@@ -194,6 +213,7 @@ function startGame(worldManager, overworld, initialView) {
       ctx.fillStyle = '#000000'
       ctx.fillRect(0, 0, view.width, view.height)
       drawBackgroundViewport(ctx, curWorld, camera, grid.cols, grid.rows)
+      drawNightOverlay(ctx, view.width, view.height)
       drawOverlayFull(ctx, curWorld, camera, player, now, grid.cols, grid.rows)
     } else {
       const dirtySet = new Set()
@@ -202,21 +222,24 @@ function startGame(worldManager, overworld, initialView) {
       addDirtyCell(dirtySet, player.x, player.y, curWorld)
 
       for (const snap of npcSnap) {
-        const { e, ox, oy } = snap
+        const { e, ox, oy, hadEmote } = snap
         if (e.x !== ox || e.y !== oy) {
           addDirtyCell(dirtySet, ox, oy, curWorld)
           addDirtyCell(dirtySet, e.x, e.y, curWorld)
+          if (hadEmote) addDirtyCell(dirtySet, ox, oy - 1, curWorld)
+        }
+        if (e.emote || hadEmote) {
+          addDirtyCell(dirtySet, e.x, e.y - 1, curWorld)
         }
       }
 
-      // Animated objects (campfires)
       if (curWorld.spatialHash) {
         const visObj = curWorld.spatialHash.getInRect(
           camera.ox, camera.oy,
           camera.ox + grid.cols, camera.oy + grid.rows,
         )
         for (const e of visObj) {
-          if (e.kind === 'object' && e.char === '*') {
+          if (e.kind === 'object' && (e.char === '*' || e.isCorpse)) {
             addDirtyCell(dirtySet, e.x, e.y, curWorld)
           }
         }
@@ -237,14 +260,50 @@ function startGame(worldManager, overworld, initialView) {
     lastOy = camera.oy
     lastCols = grid.cols
     lastRows = grid.rows
+    lastDarkness = nowDarkness
 
     const target = dialogText ? null : findInteractTarget(curWorld, player.x, player.y)
-    drawHud(ctx, view.width, view.height, player, curWorld.name, dialogText, !!target)
+    const timeStr = `${getPhase().charAt(0).toUpperCase() + getPhase().slice(1)} (${getTimeString()})`
+    drawHud(ctx, view.width, view.height, player, curWorld.name, dialogText, !!target, timeStr)
 
     requestAnimationFrame(frame)
   }
 
   requestAnimationFrame(frame)
+}
+
+function buildDialogText(target, now) {
+  if (target.kind !== 'npc') {
+    return `${target.label}:\n${target.dialog}`
+  }
+
+  const n = target
+  let header = `${n.name} (${n.race} ${n.role})`
+  let details = `${n.gender}, age ${n.age} | ${n.faction.replace('_', ' ')} | Mood: ${n.mood}`
+  let stats = `HP: ${n.hp}/${n.maxHp} | ATK: ${n.attack} DEF: ${n.defense}`
+
+  const equipParts = []
+  if (n.equipment.weapon) equipParts.push(n.equipment.weapon.name)
+  if (n.equipment.armor) equipParts.push(n.equipment.armor.name)
+  if (n.equipment.shield) equipParts.push(n.equipment.shield.name)
+  if (equipParts.length > 0) stats += `\nEquip: ${equipParts.join(', ')}`
+
+  let memoryLine = ''
+  if (n.memory && n.memory.length > 0) {
+    const recent = n.memory[n.memory.length - 1]
+    const age = now - recent.timestamp
+    if (age < 120_000) {
+      const pool = MEMORY_DIALOG[recent.type]
+      if (pool && pool.length > 0) {
+        memoryLine = pool[Math.floor(Math.random() * pool.length)]
+      }
+    }
+  }
+
+  let text = `${header}\n${details}\n${stats}`
+  if (memoryLine) text += `\n"${memoryLine}"`
+  text += `\n${n.dialog}`
+  return text
 }
 
 boot()
