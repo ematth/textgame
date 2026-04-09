@@ -14,17 +14,18 @@ let lastLines = null
  * @param {number} canvasW
  * @param {number} canvasH
  * @param {{ x: number, y: number }} player
+ * @param {string} worldName
  * @param {string | null} dialogText
  * @param {boolean} showInteractPrompt
  */
-export function drawHud(ctx, canvasW, canvasH, player, dialogText, showInteractPrompt) {
+export function drawHud(ctx, canvasW, canvasH, player, worldName, dialogText, showInteractPrompt) {
   ctx.font = HUD_FONT
   ctx.textBaseline = 'top'
 
   ctx.fillStyle = '#0f172a'
   ctx.fillRect(0, 0, canvasW, 32)
   ctx.fillStyle = '#e2e8f0'
-  ctx.fillText(`Wildlands    (${player.x}, ${player.y})`, 10, 9)
+  ctx.fillText(`${worldName}    (${player.x}, ${player.y})`, 10, 9)
 
   if (showInteractPrompt && !dialogText) {
     ctx.fillStyle = 'rgba(0,0,0,0.5)'

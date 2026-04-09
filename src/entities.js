@@ -1,161 +1,136 @@
 import { isSolid } from './world.js'
 
 /**
- * @typedef {{ id: string, kind: 'npc', x: number, y: number, char: string, fg: string, name: string, dialog: string, wanderCooldown: number }} Npc
- * @typedef {{ id: string, kind: 'object', x: number, y: number, char: string, fg: string, bg: string, label: string, dialog: string }} WorldObject
+ * @typedef {{
+ *   id: string, kind: 'npc', x: number, y: number, char: string, fg: string,
+ *   name: string, role: string, dialog: string, wanderCooldown: number,
+ *   route: { waypoints: {x:number,y:number}[], currentIndex: number } | null
+ * }} Npc
+ *
+ * @typedef {{
+ *   id: string, kind: 'object', x: number, y: number, char: string,
+ *   fg: string, bg: string, label: string, dialog: string
+ * }} WorldObject
  */
 
-/** @param {import('./world.js').generateWorld extends () => infer W ? W : never} world */
-export function createEntities(world) {
-  const cx = (world.width / 2) | 0
-  const cy = (world.height / 2) | 0
-
-  /** @type {(Npc|WorldObject)[]} */
-  const list = [
-    {
-      id: 'merchant',
-      kind: 'npc',
-      x: cx + 12,
-      y: cy,
-      char: 'M',
-      fg: '#e8c080',
-      name: 'Merchant',
-      dialog:
-        'Welcome, traveler! I sell maps and rumors. The western hills hide old ruins — mind the snakes.',
-      wanderCooldown: 0,
-    },
-    {
-      id: 'wizard',
-      kind: 'npc',
-      x: cx - 15,
-      y: cy - 8,
-      char: 'W',
-      fg: '#a78bfa',
-      name: 'Wizard',
-      dialog:
-        'The ley lines twist near the crossroads. If you hear whispers in the water, do not answer.',
-      wanderCooldown: 0,
-    },
-    {
-      id: 'guard',
-      kind: 'npc',
-      x: cx,
-      y: cy + 18,
-      char: 'G',
-      fg: '#94a3b8',
-      name: 'Guard',
-      dialog: 'Roads are safe as far as the river. Beyond that, you are on your own.',
-      wanderCooldown: 0,
-    },
-    {
-      id: 'chest1',
-      kind: 'object',
-      x: cx - 3,
-      y: cy - 2,
-      char: '■',
-      fg: '#c4944e',
-      bg: '#2a2218',
-      label: 'Chest',
-      dialog: 'A sturdy wooden chest. It is locked, but something rattles inside.',
-    },
-    {
-      id: 'sign1',
-      kind: 'object',
-      x: cx + 20,
-      y: cy + 3,
-      char: '!',
-      fg: '#fbbf24',
-      bg: '#1a2e15',
-      label: 'Sign',
-      dialog: 'North: Highland Pass — East: Marsh Flats — South: River Ford',
-    },
-    {
-      id: 'fire1',
-      kind: 'object',
-      x: cx - 20,
-      y: cy + 10,
-      char: '*',
-      fg: '#f97316',
-      bg: '#1a2e15',
-      label: 'Campfire',
-      dialog: 'Warm embers crackle. Good place to rest.',
-    },
-  ]
-
-  for (const e of list) {
-    if (e.x < 0) e.x = 5
-    if (e.y < 0) e.y = 5
-    if (e.x >= world.width) e.x = world.width - 5
-    if (e.y >= world.height) e.y = world.height - 5
-    while (isSolid(world, e.x, e.y)) {
-      e.y -= 1
-      if (e.y < 0) {
-        e.y = cy
-        break
-      }
-    }
-  }
-
-  return { list }
-}
-
-function occupiedByOther(list, x, y, except) {
-  for (const e of list) {
-    if (e === except) continue
-    if (e.x === x && e.y === y) return true
-  }
-  return false
-}
+const CULL_RADIUS = 60
 
 /**
- * @param {{ list: (Npc|WorldObject)[] }} entities
- * @param {*} world
- * @param {number} playerX
- * @param {number} playerY
- * @param {number} dtMs
+ * Update all NPCs in the active world within culling radius of the player.
+ * Uses the world's spatial hash for collision checks.
  */
-export function updateEntities(entities, world, playerX, playerY, dtMs, now) {
-  const { list } = entities
-  for (const e of list) {
+export function updateEntities(world, playerX, playerY, dtMs, now) {
+  const { list } = world.entities
+  const hash = world.spatialHash
+  if (!hash) return
+
+  for (let i = 0; i < list.length; i++) {
+    const e = list[i]
     if (e.kind !== 'npc') continue
+
+    // Cull distant NPCs
+    const dx = e.x - playerX
+    const dy = e.y - playerY
+    if (dx * dx + dy * dy > CULL_RADIUS * CULL_RADIUS) continue
 
     e.wanderCooldown -= dtMs
     if (e.wanderCooldown > 0) continue
 
-    const dirs = [
-      [0, -1],
-      [0, 1],
-      [-1, 0],
-      [1, 0],
-    ]
-    const pick = dirs[(Math.random() * 4) | 0]
-    const nx = e.x + pick[0]
-    const ny = e.y + pick[1]
+    const oldX = e.x
+    const oldY = e.y
 
-    if (isSolid(world, nx, ny)) {
-      e.wanderCooldown = 400 + Math.random() * 600
-      continue
-    }
-    if (nx === playerX && ny === playerY) {
-      e.wanderCooldown = 500
-      continue
-    }
-    if (occupiedByOther(list, nx, ny, e)) {
-      e.wanderCooldown = 300
-      continue
+    if (e.route && e.route.waypoints.length > 0) {
+      moveAlongRoute(e, world, hash, playerX, playerY)
+    } else {
+      wanderRandom(e, world, hash, playerX, playerY)
     }
 
-    e.x = nx
-    e.y = ny
-    e.wanderCooldown = 800 + Math.random() * 1200
+    if (e.x !== oldX || e.y !== oldY) {
+      hash.move(e, oldX, oldY)
+    }
   }
 }
 
-export function entityBlocksTile(entities, x, y) {
-  for (const e of entities.list) {
-    if (e.kind === 'npc' && e.x === x && e.y === y) return true
+function moveAlongRoute(e, world, hash, playerX, playerY) {
+  const route = e.route
+  const target = route.waypoints[route.currentIndex]
+  const tdx = target.x - e.x
+  const tdy = target.y - e.y
+
+  if (Math.abs(tdx) <= 1 && Math.abs(tdy) <= 1) {
+    route.currentIndex = (route.currentIndex + 1) % route.waypoints.length
+    e.wanderCooldown = 200 + Math.random() * 400
+    return
   }
-  return false
+
+  // Greedy axis-aligned: prefer the axis with larger delta
+  let stepX = 0
+  let stepY = 0
+  if (Math.abs(tdx) >= Math.abs(tdy)) {
+    stepX = tdx > 0 ? 1 : -1
+  } else {
+    stepY = tdy > 0 ? 1 : -1
+  }
+
+  let nx = e.x + stepX
+  let ny = e.y + stepY
+
+  if (canMoveTo(nx, ny, e, world, hash, playerX, playerY)) {
+    e.x = nx
+    e.y = ny
+    e.wanderCooldown = 150 + Math.random() * 250
+    return
+  }
+
+  // Fallback: try the other axis
+  if (stepX !== 0 && tdy !== 0) {
+    nx = e.x
+    ny = e.y + (tdy > 0 ? 1 : -1)
+  } else if (stepY !== 0 && tdx !== 0) {
+    nx = e.x + (tdx > 0 ? 1 : -1)
+    ny = e.y
+  } else {
+    e.wanderCooldown = 400 + Math.random() * 600
+    return
+  }
+
+  if (canMoveTo(nx, ny, e, world, hash, playerX, playerY)) {
+    e.x = nx
+    e.y = ny
+    e.wanderCooldown = 150 + Math.random() * 250
+  } else {
+    e.wanderCooldown = 400 + Math.random() * 600
+  }
+}
+
+function wanderRandom(e, world, hash, playerX, playerY) {
+  const dirs = [[0, -1], [0, 1], [-1, 0], [1, 0]]
+  const pick = dirs[(Math.random() * 4) | 0]
+  const nx = e.x + pick[0]
+  const ny = e.y + pick[1]
+
+  if (canMoveTo(nx, ny, e, world, hash, playerX, playerY)) {
+    e.x = nx
+    e.y = ny
+    e.wanderCooldown = 800 + Math.random() * 1200
+  } else {
+    e.wanderCooldown = 400 + Math.random() * 600
+  }
+}
+
+function canMoveTo(nx, ny, entity, world, hash, playerX, playerY) {
+  if (isSolid(world, nx, ny)) return false
+  if (nx === playerX && ny === playerY) return false
+  if (hash.hasEntityAt(nx, ny, entity)) return false
+  return true
+}
+
+/**
+ * Check if any NPC blocks the given tile (used for player movement).
+ */
+export function entityBlocksTile(world, x, y) {
+  if (!world.spatialHash) return false
+  return world.spatialHash.hasNpcAt(x, y)
 }
 
 function chebyshev(px, py, ex, ey) {
@@ -163,21 +138,21 @@ function chebyshev(px, py, ex, ey) {
 }
 
 /**
- * NPCs: must be adjacent (distance 1), not same tile.
- * Objects: same tile or adjacent.
- * @returns {Npc|WorldObject|null}
+ * Find nearest interactable entity adjacent to the player.
+ * NPCs: distance exactly 1. Objects: distance <= 1.
  */
-export function findInteractTarget(entities, playerX, playerY) {
+export function findInteractTarget(world, playerX, playerY) {
+  if (!world.spatialHash) return null
+  const nearby = world.spatialHash.getInRect(playerX - 1, playerY - 1, playerX + 1, playerY + 1)
+
   let npc = null
   let obj = null
-  for (const e of entities.list) {
+  for (const e of nearby) {
     const d = chebyshev(playerX, playerY, e.x, e.y)
     if (e.kind === 'npc') {
-      if (d !== 1) continue
-      npc = /** @type {Npc} */ (e)
+      if (d === 1) npc = e
     } else {
-      if (d > 1) continue
-      obj = /** @type {WorldObject} */ (e)
+      if (d <= 1) obj = e
     }
   }
   return npc ?? obj

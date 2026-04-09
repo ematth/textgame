@@ -79,7 +79,7 @@ export function getGridDimensions(canvasWidth, canvasHeight) {
   return { cols, rows }
 }
 
-const VOID_TILE = { char: '▲', fg: '#8a8a8a', bg: '#2a2a2a' }
+const VOID_TILE = { char: ' ', fg: '#000000', bg: '#000000' }
 
 export function drawBackgroundViewport(ctx, world, camera, viewCols, viewRows) {
   ctx.font = getFontString()
@@ -159,14 +159,22 @@ function drawObjectCell(ctx, obj, td, vc, vr, time) {
   ctx.fillText(obj.char, xPx, yPx)
 }
 
-export function drawOverlayFull(ctx, world, camera, entities, player, time, viewCols, viewRows) {
+/**
+ * Draw all entities in the viewport using the world's spatial hash.
+ */
+export function drawOverlayFull(ctx, world, camera, player, time, viewCols, viewRows) {
   ctx.font = getFontString()
   ctx.textBaseline = 'top'
 
   const { ox, oy } = camera
   const playerFg = '#f8fafc'
 
-  for (const e of entities.list) {
+  // Query spatial hash for visible entities
+  const visible = world.spatialHash
+    ? world.spatialHash.getInRect(ox, oy, ox + viewCols - 1, oy + viewRows - 1)
+    : world.entities.list
+
+  for (const e of visible) {
     const vc = e.x - ox
     const vr = e.y - oy
     if (vc < 0 || vc >= viewCols || vr < 0 || vr >= viewRows) continue
@@ -189,19 +197,6 @@ export function drawOverlayFull(ctx, world, camera, entities, player, time, view
   }
 }
 
-function findEntityAt(entities, wx, wy) {
-  /** @type {any} */
-  let npc = null
-  /** @type {any} */
-  let obj = null
-  for (const e of entities.list) {
-    if (e.x !== wx || e.y !== wy) continue
-    if (e.kind === 'npc') npc = e
-    else obj = e
-  }
-  return { npc, obj }
-}
-
 function drawTileCell(ctx, world, wx, wy, vc, vr) {
   const td = TILE_DEFS[world.tiles[wy * world.width + wx]] ?? TILE_DEFS[0]
   const xPx = vc * cellW
@@ -214,7 +209,7 @@ function drawTileCell(ctx, world, wx, wy, vc, vr) {
   }
 }
 
-export function drawOverlayDirty(ctx, world, camera, entities, player, time, dirtyWorldCells, viewCols, viewRows) {
+export function drawOverlayDirty(ctx, world, camera, player, time, dirtyWorldCells, viewCols, viewRows) {
   ctx.font = getFontString()
   ctx.textBaseline = 'top'
 
@@ -229,7 +224,14 @@ export function drawOverlayDirty(ctx, world, camera, entities, player, time, dir
 
     drawTileCell(ctx, world, wx, wy, vc, vr)
 
-    const { npc, obj } = findEntityAt(entities, wx, wy)
+    // Use spatial hash for entity lookup at this tile
+    const atTile = world.spatialHash ? world.spatialHash.getAt(wx, wy) : []
+    let npc = null
+    let obj = null
+    for (const e of atTile) {
+      if (e.kind === 'npc') npc = e
+      else obj = e
+    }
 
     if (obj) {
       const td = TILE_DEFS[world.tiles[wy * world.width + wx]] ?? TILE_DEFS[0]
