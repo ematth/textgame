@@ -59,6 +59,20 @@ function makeBox(tiles, w, h, W, wallTile, floorTile) {
   }
 }
 
+function carveEllipse(tiles, W, cx, cy, rw, rh) {
+  const h = tiles.length / W
+  for (let dy = -rh; dy <= rh; dy++) {
+    for (let dx = -rw; dx <= rw; dx++) {
+      if ((dx * dx) / (rw * rw) + (dy * dy) / (rh * rh) <= 1) {
+        const px = cx + dx, py = cy + dy
+        if (px > 0 && px < W - 1 && py > 0 && py < h - 1) {
+          tiles[py * W + px] = TILE.PATH
+        }
+      }
+    }
+  }
+}
+
 const TEMPLATES = {
   house(info) {
     const w = 10
@@ -300,6 +314,72 @@ const TEMPLATES = {
     return { width: w, height: h, tiles, exitX, exitY, name: 'Castle Chamber' }
   },
 
+  cave(info) {
+    const w = 50
+    const h = 50
+    const W = w
+    const tiles = new Uint16Array(w * h)
+    tiles.fill(TILE.MOUNTAIN)
+
+    const seed = (info.doorX || 0) * 1000 + (info.doorY || 0)
+    let s = seed
+    function r() {
+      s = (s * 1103515245 + 12345) & 0x7fffffff
+      return (s >>> 16) / 32768
+    }
+
+    // Carve irregular cavern rooms
+    const rooms = []
+    // Entrance cavern
+    carveEllipse(tiles, W, 25, 44, 5, 4)
+    rooms.push({ x: 25, y: 44, rw: 5, rh: 4 })
+
+    for (let i = 0; i < 10; i++) {
+      const cx = 4 + ((r() * (w - 8)) | 0)
+      const cy = 4 + ((r() * (h - 8)) | 0)
+      const rw = 3 + ((r() * 5) | 0)
+      const rh = 3 + ((r() * 5) | 0)
+      carveEllipse(tiles, W, cx, cy, rw, rh)
+      rooms.push({ x: cx, y: cy, rw, rh })
+    }
+
+    // Connect rooms with winding tunnels
+    for (let i = 1; i < rooms.length; i++) {
+      const a = rooms[i - 1]
+      const b = rooms[i]
+      let cx = a.x, cy = a.y
+      while (cx !== b.x || cy !== b.y) {
+        if (cx >= 0 && cx < w && cy >= 0 && cy < h) {
+          tiles[cy * W + cx] = TILE.PATH
+          if (cx + 1 < w) tiles[cy * W + cx + 1] = TILE.PATH
+          if (cy + 1 < h) tiles[(cy + 1) * W + cx] = TILE.PATH
+        }
+        if (r() < 0.6 && cx !== b.x) cx += cx < b.x ? 1 : -1
+        else if (cy !== b.y) cy += cy < b.y ? 1 : -1
+        else cx += cx < b.x ? 1 : -1
+      }
+    }
+
+    // Water pools in some rooms
+    for (let i = 3; i < rooms.length && i < 6; i++) {
+      const rm = rooms[i]
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          const px = rm.x + dx, py = rm.y + dy
+          if (px > 0 && px < w && py > 0 && py < h) {
+            tiles[py * W + px] = TILE.WATER
+          }
+        }
+      }
+    }
+
+    const exitX = 25
+    const exitY = 48
+    tiles[exitY * W + exitX] = TILE.STAIR_UP
+
+    return { width: w, height: h, tiles, exitX, exitY, name: 'Cave' }
+  },
+
   dungeon(info) {
     const w = 40
     const h = 40
@@ -389,4 +469,15 @@ export function generateAllInteriors(buildingRegistry, worldManager) {
     interiors.push(interior)
   }
   return interiors
+}
+
+/**
+ * Lazily generate a single interior for a building that wasn't pre-generated.
+ */
+export function ensureInterior(buildingInfo, worldManager) {
+  const id = `interior_${buildingInfo.id}`
+  if (worldManager.getWorld(id)) return worldManager.getWorld(id)
+  const interior = createInterior(buildingInfo, worldManager)
+  worldManager.registerWorld(interior)
+  return interior
 }

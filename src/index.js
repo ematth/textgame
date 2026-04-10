@@ -1,5 +1,5 @@
-import { initInput, getDirection, consumeSpacePress, isSpaceDown, consumeZoomDelta } from './input.js'
-import { generateWorld } from './world.js'
+import { initInput, getDirection, consumeSpacePress, isSpaceDown, consumeZoomDelta, consumeMapToggle } from './input.js'
+import { generateWorld, ensureAreaLoaded, WORLD_W, WORLD_H } from './world.js'
 import { createPlayer, tryMovePlayer } from './player.js'
 import { computeCameraOrigin } from './camera.js'
 import { updateEntities, entityBlocksTile, findInteractTarget } from './entities.js'
@@ -17,12 +17,15 @@ import {
 import { drawHud } from './hud.js'
 import { createWorldManager } from './worldManager.js'
 import { buildSpatialHash } from './spatialHash.js'
-import { generateAllInteriors } from './interiors.js'
-import { populateNPCs } from './npcFactory.js'
+import { ensureInterior } from './interiors.js'
+import { spawnNPCsForPOI } from './npcFactory.js'
 import { drawLoadingScreen, yieldFrame } from './loading.js'
 import { DamageQueue } from './combat.js'
 import { tickClock, getTimeString, getPhase } from './worldClock.js'
 import { MEMORY_DIALOG } from './npcData.js'
+import { createWorldMap, drawWorldMap, updateWorldMapCamera } from './worldMap.js'
+import { CHUNK_BITS, CHUNK_SIZE } from './chunks.js'
+import { BIOME_NAMES, getBiome } from './biomes.js'
 
 const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById('game'))
 if (!canvas) throw new Error('#game canvas missing')
@@ -39,34 +42,24 @@ async function boot() {
     drawLoadingScreen(ctx, view.width, view.height, phase, progress)
   }
 
-  show('Generating overworld...', 0)
+  show('Shaping the continent...', 0)
   await yieldFrame()
 
-  const { world: overworld, buildingRegistry, districtMap } = generateWorld()
-  show('Generating overworld...', 0.15)
+  const { world: overworld } = generateWorld()
+  show('Shaping the continent...', 0.3)
   await yieldFrame()
 
   const worldManager = createWorldManager()
   worldManager.registerWorld(overworld)
   worldManager.setActiveWorld('overworld')
 
-  show('Furnishing buildings...', 0.25)
+  show('Populating settlements...', 0.5)
   await yieldFrame()
 
-  const interiors = generateAllInteriors(buildingRegistry, worldManager)
-  show('Furnishing buildings...', 0.45)
-  await yieldFrame()
-
-  for (const interior of interiors) {
-    worldManager.registerWorld(interior)
-  }
-
-  show('Summoning citizens...', 0.55)
-  await yieldFrame()
-
-  populateNPCs(worldManager, districtMap, buildingRegistry)
-  show('Summoning citizens...', 0.75)
-  await yieldFrame()
+  // Generate interiors and NPCs for structures near spawn
+  const spawnX = (WORLD_W / 2) | 0
+  const spawnY = (WORLD_H / 2) | 0
+  setupNearbyStructures(overworld, worldManager, spawnX, spawnY, 300)
 
   show('Indexing the realm...', 0.8)
   await yieldFrame()
@@ -77,16 +70,75 @@ async function boot() {
 
   show('The gates are open.', 1.0)
   await yieldFrame()
-
   await new Promise((r) => setTimeout(r, 300))
 
   startGame(worldManager, overworld, view)
 }
 
+function setupNearbyStructures(overworld, worldManager, cx, cy, radius) {
+  const portals = []
+  const x0 = (cx - radius) >> CHUNK_BITS
+  const y0 = (cy - radius) >> CHUNK_BITS
+  const x1 = (cx + radius) >> CHUNK_BITS
+  const y1 = (cy + radius) >> CHUNK_BITS
+
+  for (let ccy = y0; ccy <= y1; ccy++) {
+    for (let ccx = x0; ccx <= x1; ccx++) {
+      const chunk = overworld.chunkCache.getOrGenerate(ccx, ccy)
+      for (const p of chunk.portals) {
+        portals.push(p)
+      }
+    }
+  }
+
+  const processedInteriors = new Set()
+  for (const p of portals) {
+    if (!p.building) continue
+    const bld = p.building
+    const intId = `interior_${bld.id}`
+    if (processedInteriors.has(intId)) continue
+    processedInteriors.add(intId)
+
+    const interior = ensureInterior(bld, worldManager)
+    spawnNPCsForPOI(worldManager, bld, interior)
+  }
+}
+
+// Track which chunks have had their structures initialized
+const initializedChunks = new Set()
+
+function ensureChunkStructures(overworld, worldManager, playerX, playerY) {
+  const radius = 2
+  const pcx = playerX >> CHUNK_BITS
+  const pcy = playerY >> CHUNK_BITS
+
+  for (let dy = -radius; dy <= radius; dy++) {
+    for (let dx = -radius; dx <= radius; dx++) {
+      const ccx = pcx + dx
+      const ccy = pcy + dy
+      const key = (ccx << 16) ^ ccy
+      if (initializedChunks.has(key)) continue
+      initializedChunks.add(key)
+
+      const chunk = overworld.chunkCache.getOrGenerate(ccx, ccy)
+      for (const p of chunk.portals) {
+        if (!p.building) continue
+        const bld = p.building
+        const intId = `interior_${bld.id}`
+        if (worldManager.getWorld(intId)) continue
+
+        const interior = ensureInterior(bld, worldManager)
+        spawnNPCsForPOI(worldManager, bld, interior)
+        interior.spatialHash = buildSpatialHash(interior.entities.list)
+      }
+    }
+  }
+}
+
 function startGame(worldManager, overworld, initialView) {
-  const cx = (overworld.width / 2) | 0
-  const cy = (overworld.height / 2) | 0
-  const player = createPlayer(cx + 3, cy)
+  const spawnX = (WORLD_W / 2) | 0
+  const spawnY = (WORLD_H / 2) | 0
+  const player = createPlayer(spawnX + 3, spawnY)
 
   initInput()
 
@@ -99,9 +151,11 @@ function startGame(worldManager, overworld, initialView) {
   /** @type {string | null} */
   let dialogText = null
   let dialogOpenedAt = 0
-  /** @type {any} NPC currently in conversation with the player */
+  /** @type {any} */
   let dialogTarget = null
   let forceFullRedraw = true
+  let mapOpen = false
+  const worldMap = createWorldMap(WORLD_W, WORLD_H, overworld.seed)
 
   window.addEventListener('resize', () => {
     view = resizeCanvas(canvas, ctx)
@@ -110,16 +164,9 @@ function startGame(worldManager, overworld, initialView) {
   })
 
   let lastTs = performance.now()
-  let lastOx = camera.ox
-  let lastOy = camera.oy
+  let lastDarkness = currentNightDarkness()
   let lastCols = -1
   let lastRows = -1
-  let lastDarkness = currentNightDarkness()
-
-  function addDirtyCell(dirtySet, wx, wy, world) {
-    if (wx < 0 || wx >= world.width || wy < 0 || wy >= world.height) return
-    dirtySet.add(wy * world.width + wx)
-  }
 
   function frame(now) {
     const dt = Math.min(50, now - lastTs)
@@ -130,9 +177,31 @@ function startGame(worldManager, overworld, initialView) {
     const activeWorld = worldManager.getActiveWorld()
     if (!activeWorld) { requestAnimationFrame(frame); return }
 
+    // Toggle world map
+    if (consumeMapToggle()) {
+      mapOpen = !mapOpen
+      forceFullRedraw = true
+    }
+
+    if (mapOpen) {
+      consumeSpacePress()
+      const zd = consumeZoomDelta()
+      const dir = getDirection()
+      updateWorldMapCamera(worldMap, dir, zd, view.width, view.height)
+      drawWorldMap(ctx, worldMap, view.width, view.height, player.x, player.y, overworld.seed)
+
+      requestAnimationFrame(frame)
+      return
+    }
+
+    // Ensure chunks are loaded around the player
+    if (activeWorld.isChunked) {
+      ensureAreaLoaded(activeWorld, player.x, player.y, Math.max(grid.cols, grid.rows) + CHUNK_SIZE)
+      ensureChunkStructures(activeWorld, worldManager, player.x, player.y)
+    }
+
     const prevOx = camera.ox
     const prevOy = camera.oy
-
     const playerOldX = player.x
     const playerOldY = player.y
 
@@ -256,17 +325,27 @@ function startGame(worldManager, overworld, initialView) {
       drawOverlayDirty(ctx, curWorld, camera, player, now, dirtyCells, grid.cols, grid.rows)
     }
 
-    lastOx = camera.ox
-    lastOy = camera.oy
+    lastDarkness = nowDarkness
     lastCols = grid.cols
     lastRows = grid.rows
-    lastDarkness = nowDarkness
+
+    // Biome name for HUD
+    let biomeName = ''
+    if (curWorld.isChunked) {
+      biomeName = BIOME_NAMES[getBiome(player.x, player.y)] || ''
+    }
 
     const target = dialogText ? null : findInteractTarget(curWorld, player.x, player.y)
     const timeStr = `${getPhase().charAt(0).toUpperCase() + getPhase().slice(1)} (${getTimeString()})`
-    drawHud(ctx, view.width, view.height, player, curWorld.name, dialogText, !!target, timeStr)
+    const worldLabel = curWorld.isChunked ? `${curWorld.name} - ${biomeName}` : curWorld.name
+    drawHud(ctx, view.width, view.height, player, worldLabel, dialogText, !!target, timeStr)
 
     requestAnimationFrame(frame)
+  }
+
+  function addDirtyCell(dirtySet, wx, wy, world) {
+    if (wx < 0 || wx >= world.width || wy < 0 || wy >= world.height) return
+    dirtySet.add(wy * world.width + wx)
   }
 
   requestAnimationFrame(frame)

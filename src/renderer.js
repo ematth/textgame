@@ -1,6 +1,7 @@
 import { TILE_DEFS } from './tiles.js'
 import { prepareWithSegments, walkLineRanges } from '@chenglou/pretext'
 import { getNightDarkness } from './worldClock.js'
+import { getTile as worldGetTile } from './world.js'
 
 const FONT_FAMILY = '"Courier New", monospace'
 const FONT_SIZE = 16
@@ -89,7 +90,6 @@ export function drawBackgroundViewport(ctx, world, camera, viewCols, viewRows) {
   const { ox, oy } = camera
   const W = world.width
   const H = world.height
-  const tiles = world.tiles
 
   for (let vr = 0; vr < viewRows; vr++) {
     const wy = oy + vr
@@ -118,7 +118,8 @@ export function drawBackgroundViewport(ctx, world, camera, viewCols, viewRows) {
     for (let vc = 0; vc < viewCols; vc++) {
       const wx = ox + vc
       const oob = wx < 0 || wx >= W || wy < 0 || wy >= H
-      const td = oob ? VOID_TILE : (TILE_DEFS[tiles[wy * W + wx]] ?? TILE_DEFS[0])
+      const tileId = oob ? -1 : worldGetTile(world, wx, wy)
+      const td = oob ? VOID_TILE : (TILE_DEFS[tileId] ?? TILE_DEFS[0])
       const fg = td.fg
       const bg = td.bg
       const ch = td.char
@@ -180,7 +181,7 @@ export function drawOverlayFull(ctx, world, camera, player, time, viewCols, view
     const vr = e.y - oy
     if (vc < 0 || vc >= viewCols || vr < 0 || vr >= viewRows) continue
 
-    const td = TILE_DEFS[world.tiles[e.y * world.width + e.x]] ?? TILE_DEFS[0]
+    const td = TILE_DEFS[worldGetTile(world, e.x, e.y)] ?? TILE_DEFS[0]
 
     if (e.kind === 'npc') {
       ctx.fillStyle = e.combatState ? '#ff4444' : e.fg
@@ -203,7 +204,7 @@ export function drawOverlayFull(ctx, world, camera, player, time, viewCols, view
 }
 
 function drawTileCell(ctx, world, wx, wy, vc, vr) {
-  const td = TILE_DEFS[world.tiles[wy * world.width + wx]] ?? TILE_DEFS[0]
+  const td = TILE_DEFS[worldGetTile(world, wx, wy)] ?? TILE_DEFS[0]
   const xPx = vc * cellW
   const yPx = vr * cellH
   ctx.fillStyle = td.bg
@@ -245,7 +246,7 @@ export function drawOverlayDirty(ctx, world, camera, player, time, dirtyWorldCel
     }
 
     if (obj) {
-      const td = TILE_DEFS[world.tiles[wy * world.width + wx]] ?? TILE_DEFS[0]
+      const td = TILE_DEFS[worldGetTile(world, wx, wy)] ?? TILE_DEFS[0]
       drawObjectCell(ctx, obj, td, vc, vr, time)
     }
     if (npc) {

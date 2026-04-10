@@ -23,12 +23,21 @@ export function createWorldManager() {
   const worlds = new Map()
   let activeWorldId = ''
 
+  // Fast portal lookup: worldId -> Map<"x,y" -> portal>
+  const portalIndex = new Map()
+
   function registerWorld(world) {
     if (!world.spatialHash) {
       world.spatialHash = buildSpatialHash(world.entities.list)
     }
     if (!world.portals) world.portals = []
     worlds.set(world.id, world)
+    // Index existing portals
+    if (!portalIndex.has(world.id)) portalIndex.set(world.id, new Map())
+    const idx = portalIndex.get(world.id)
+    for (const p of world.portals) {
+      idx.set(`${p.x},${p.y}`, p)
+    }
   }
 
   function setActiveWorld(id) {
@@ -46,16 +55,16 @@ export function createWorldManager() {
   function addPortal(worldId, x, y, targetWorldId, targetX, targetY) {
     const w = worlds.get(worldId)
     if (!w) return
-    w.portals.push({ x, y, targetWorldId, targetX, targetY })
+    const portal = { x, y, targetWorldId, targetX, targetY }
+    w.portals.push(portal)
+    if (!portalIndex.has(worldId)) portalIndex.set(worldId, new Map())
+    portalIndex.get(worldId).set(`${x},${y}`, portal)
   }
 
   function checkPortal(worldId, x, y) {
-    const w = worlds.get(worldId)
-    if (!w) return null
-    for (const p of w.portals) {
-      if (p.x === x && p.y === y) return p
-    }
-    return null
+    const idx = portalIndex.get(worldId)
+    if (!idx) return null
+    return idx.get(`${x},${y}`) ?? null
   }
 
   function transition(player, portal) {

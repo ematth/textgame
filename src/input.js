@@ -1,5 +1,6 @@
 const keys = new Set()
 let spacePressedThisFrame = false
+let mapToggleThisFrame = false
 let zoomDelta = 0
 
 const MOVE = {
@@ -15,6 +16,9 @@ export function initInput() {
     if (e.code === 'Space') {
       spacePressedThisFrame = true
     }
+    if (e.code === 'KeyM') {
+      mapToggleThisFrame = true
+    }
     if (e.key === '+' || e.key === '=') {
       zoomDelta += 1
       e.preventDefault()
@@ -22,7 +26,7 @@ export function initInput() {
       zoomDelta -= 1
       e.preventDefault()
     }
-    if (e.code === 'Space' || e.code in MOVE) {
+    if (e.code === 'Space' || e.code === 'KeyM' || e.code in MOVE) {
       e.preventDefault()
     }
   })
@@ -66,6 +70,13 @@ export function consumeSpacePress() {
   const s = spacePressedThisFrame
   spacePressedThisFrame = false
   return s
+}
+
+/** One-shot: returns true once when M was pressed, then clears. */
+export function consumeMapToggle() {
+  const m = mapToggleThisFrame
+  mapToggleThisFrame = false
+  return m
 }
 
 /** Returns accumulated zoom step since last consume, then clears. */

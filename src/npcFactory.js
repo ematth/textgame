@@ -19,6 +19,9 @@ function mulberry32(seed) {
   }
 }
 
+let globalNpcId = 0
+const globalUsedNames = new Set()
+
 // ============================================================
 // HELPERS
 // ============================================================
@@ -385,4 +388,240 @@ function seedRelationships(npcs, rng) {
       setRelation(b.id, a.id, reverseDisp, rTrust)
     }
   }
+}
+
+// ============================================================
+// PER-POI NPC SPAWNING (for chunk-based world)
+// ============================================================
+
+const _spawnedPOIs = new Set()
+
+export function spawnOverworldNPCsForStructure(worldManager, poi) {
+  if (_spawnedPOIs.has(poi.id || `${poi.x}_${poi.y}`)) return
+  _spawnedPOIs.add(poi.id || `${poi.x}_${poi.y}`)
+
+  const overworld = worldManager.getWorld('overworld')
+  if (!overworld) return
+
+  const seed = hashString(poi.id || `struct_${poi.x}_${poi.y}`)
+  const rng = mulberry32(seed)
+
+  // Only spawn outdoor NPCs for settlement-type buildings
+  const settleTypes = ['house', 'shop', 'tavern', 'blacksmith', 'temple', 'barracks', 'noble_house', 'castle_throne']
+  if (!settleTypes.includes(poi.type)) return
+
+  const count = poi.type === 'castle_throne' ? 3 : rng() < 0.6 ? 1 : 0
+  for (let n = 0; n < count; n++) {
+    for (let attempt = 0; attempt < 15; attempt++) {
+      const ox = poi.doorX + ((rng() * 10) | 0) - 5
+      const oy = poi.doorY + ((rng() * 10) | 0) - 5
+      if (!isSolid(overworld, ox, oy)) {
+        const interiorRoles = ROLES.filter((r) => !r.interior)
+        const role = interiorRoles[(rng() * interiorRoles.length) | 0]
+        if (!role) continue
+        const race = pickRaceWith(rng)
+        const npc = createQuickNpc(rng, ox, oy, role, race)
+        overworld.entities.list.push(npc)
+        if (overworld.spatialHash) overworld.spatialHash.insert(npc)
+        break
+      }
+    }
+  }
+}
+
+function pickRaceWith(rng) {
+  const r = rng()
+  for (let i = 0; i < RACE_CUM_WEIGHTS.length; i++) {
+    if (r < RACE_CUM_WEIGHTS[i]) return RACES[i]
+  }
+  return RACES[0]
+}
+
+function createQuickNpc(rng, x, y, role, race) {
+  const gender = rng() < 0.5 ? 'male' : 'female'
+  const names = gender === 'male' ? race.maleNames : race.femaleNames
+  const first = names[(rng() * names.length) | 0]
+  const last = SURNAMES[(rng() * SURNAMES.length) | 0]
+  let full = `${first} ${last}`
+  if (globalUsedNames.has(full)) full = `${first} ${last} the ${++globalNpcId}`
+  globalUsedNames.add(full)
+
+  const stats = COMBAT_STATS[role.name] || { maxHp: 20, attack: 3, defense: 2 }
+  const equip = EQUIPMENT_TABLES[role.name] || { weapon: null, armor: null, shield: null }
+  const pBase = PERSONALITY_BASES[role.name] || { bravery: 0.5, sociability: 0.5, aggression: 0.3, greed: 0.3, loyalty: 0.5 }
+  const ageRange = ROLE_AGE_RANGES[role.name] || [18, 60]
+  const phys = RACE_PHYSICALS[race.name] || RACE_PHYSICALS.Human
+  const pVar = 0.15
+  const char = race.chars[role.name] || role.name[0]
+  const dialog = DIALOG[role.name]?.[((rng() * (DIALOG[role.name]?.length || 1)) | 0)] || 'I have nothing to say.'
+
+  return {
+    id: `npc_ow_${globalNpcId++}`,
+    kind: 'npc', x, y, char, fg: role.fg,
+    name: full, role: role.name, race: race.name,
+    dialog, wanderCooldown: rng() * 2000, route: null,
+    gender,
+    age: ageRange[0] + ((rng() * (ageRange[1] - ageRange[0])) | 0),
+    height: Math.round(phys.heightBase + (rng() - 0.5) * 2 * phys.heightVar),
+    weight: Math.round(phys.weightBase + (rng() - 0.5) * 2 * phys.weightVar),
+    backstory: '',
+    mood: MOODS[(rng() * MOODS.length) | 0],
+    hp: stats.maxHp, maxHp: stats.maxHp, attack: stats.attack, defense: stats.defense, alive: true,
+    equipment: {
+      weapon: equip.weapon ? { ...equip.weapon } : null,
+      armor: equip.armor ? { ...equip.armor } : null,
+      shield: equip.shield ? { ...equip.shield } : null,
+    },
+    bravery: clamp01(pBase.bravery + (rng() - 0.5) * 2 * pVar),
+    sociability: clamp01(pBase.sociability + (rng() - 0.5) * 2 * pVar),
+    aggression: clamp01(pBase.aggression + (rng() - 0.5) * 2 * pVar),
+    greed: clamp01(pBase.greed + (rng() - 0.5) * 2 * pVar),
+    loyalty: clamp01(pBase.loyalty + (rng() - 0.5) * 2 * pVar),
+    hunger: rng() * 30, thirst: rng() * 20, rest: rng() * 25,
+    faction: getFactionForRole(role.name), memory: [],
+    home: null, workplace: null, schedule: 'work',
+    combatState: null, fleeState: null, interactionCooldown: 0,
+    emote: null, emoteExpiry: 0, destination: null,
+  }
+}
+
+export function spawnNPCsForPOI(worldManager, buildingInfo, interiorWorld) {
+  if (!interiorWorld) return
+  if (buildingInfo.type === 'dungeon' || buildingInfo.type === 'cave') return
+
+  // Also spawn outdoor NPCs near this building
+  spawnOverworldNPCsForStructure(worldManager, buildingInfo)
+
+  const seed = hashString(buildingInfo.id)
+  const rng = mulberry32(seed)
+
+  const interiorRoles = ROLES.filter((r) => r.interior)
+
+  function generateName(race, gender) {
+    const names = gender === 'male' ? race.maleNames : race.femaleNames
+    for (let attempts = 0; attempts < 100; attempts++) {
+      const first = names[(rng() * names.length) | 0]
+      const last = SURNAMES[(rng() * SURNAMES.length) | 0]
+      const full = `${first} ${last}`
+      if (!globalUsedNames.has(full)) {
+        globalUsedNames.add(full)
+        return full
+      }
+    }
+    const first = names[(rng() * names.length) | 0]
+    const last = SURNAMES[(rng() * SURNAMES.length) | 0]
+    return `${first} ${last} the ${++globalNpcId}`
+  }
+
+  function pickRace() {
+    const r = rng()
+    for (let i = 0; i < RACE_CUM_WEIGHTS.length; i++) {
+      if (r < RACE_CUM_WEIGHTS[i]) return RACES[i]
+    }
+    return RACES[0]
+  }
+
+  function pickDialog(roleName) {
+    const pool = DIALOG[roleName]
+    if (!pool || pool.length === 0) return 'I have nothing to say.'
+    return pool[(rng() * pool.length) | 0]
+  }
+
+  function pickBackstory(roleName) {
+    const pool = BACKSTORY_TEMPLATES[roleName]
+    if (!pool || pool.length === 0) return ''
+    return pool[(rng() * pool.length) | 0]
+  }
+
+  const count = rng() < 0.4 ? 1 : rng() < 0.6 ? 2 : 0
+  for (let n = 0; n < count; n++) {
+    for (let attempts = 0; attempts < 20; attempts++) {
+      const ix = 2 + ((rng() * (interiorWorld.width - 4)) | 0)
+      const iy = 2 + ((rng() * (interiorWorld.height - 4)) | 0)
+      if (!isSolid(interiorWorld, ix, iy)) {
+        let role
+        if (buildingInfo.type === 'shop') role = ROLES.find((r) => r.name === 'Merchant')
+        else if (buildingInfo.type === 'tavern') role = ROLES.find((r) => r.name === 'Innkeeper')
+        else if (buildingInfo.type === 'blacksmith') role = ROLES.find((r) => r.name === 'Blacksmith')
+        else if (buildingInfo.type === 'temple') role = ROLES.find((r) => r.name === 'Priest')
+        else if (buildingInfo.type === 'barracks') role = ROLES.find((r) => r.name === 'Soldier')
+        else if (buildingInfo.type === 'noble_house') role = ROLES.find((r) => r.name === 'Servant')
+        else if (buildingInfo.type === 'castle_throne') role = ROLES.find((r) => r.name === 'Knight')
+        else if (buildingInfo.type === 'castle_chamber') role = ROLES.find((r) => r.name === 'Servant')
+        else role = interiorRoles[(rng() * interiorRoles.length) | 0]
+
+        if (!role) role = interiorRoles[(rng() * interiorRoles.length) | 0]
+
+        const race = pickRace()
+        const gender = rng() < 0.5 ? 'male' : 'female'
+        const stats = COMBAT_STATS[role.name] || { maxHp: 20, attack: 3, defense: 2 }
+        const equip = EQUIPMENT_TABLES[role.name] || { weapon: null, armor: null, shield: null }
+        const pBase = PERSONALITY_BASES[role.name] || { bravery: 0.5, sociability: 0.5, aggression: 0.3, greed: 0.3, loyalty: 0.5 }
+        const ageRange = ROLE_AGE_RANGES[role.name] || [18, 60]
+        const phys = RACE_PHYSICALS[race.name] || RACE_PHYSICALS.Human
+        const pVar = 0.15
+        const char = race.chars[role.name] || role.name[0]
+
+        const npc = {
+          id: `npc_poi_${globalNpcId++}`,
+          kind: 'npc',
+          x: ix,
+          y: iy,
+          char,
+          fg: role.fg,
+          name: generateName(race, gender),
+          role: role.name,
+          race: race.name,
+          dialog: pickDialog(role.name),
+          wanderCooldown: rng() * 2000,
+          route: null,
+          gender,
+          age: ageRange[0] + ((rng() * (ageRange[1] - ageRange[0])) | 0),
+          height: Math.round(phys.heightBase + (rng() - 0.5) * 2 * phys.heightVar),
+          weight: Math.round(phys.weightBase + (rng() - 0.5) * 2 * phys.weightVar),
+          backstory: pickBackstory(role.name),
+          mood: MOODS[(rng() * MOODS.length) | 0],
+          hp: stats.maxHp,
+          maxHp: stats.maxHp,
+          attack: stats.attack,
+          defense: stats.defense,
+          alive: true,
+          equipment: {
+            weapon: equip.weapon ? { ...equip.weapon } : null,
+            armor: equip.armor ? { ...equip.armor } : null,
+            shield: equip.shield ? { ...equip.shield } : null,
+          },
+          bravery:     clamp01(pBase.bravery     + (rng() - 0.5) * 2 * pVar),
+          sociability: clamp01(pBase.sociability + (rng() - 0.5) * 2 * pVar),
+          aggression:  clamp01(pBase.aggression  + (rng() - 0.5) * 2 * pVar),
+          greed:       clamp01(pBase.greed       + (rng() - 0.5) * 2 * pVar),
+          loyalty:     clamp01(pBase.loyalty     + (rng() - 0.5) * 2 * pVar),
+          hunger: rng() * 30,
+          thirst: rng() * 20,
+          rest: rng() * 25,
+          faction: getFactionForRole(role.name),
+          memory: [],
+          home: null,
+          workplace: null,
+          schedule: 'work',
+          combatState: null,
+          fleeState: null,
+          interactionCooldown: 0,
+          emote: null,
+          emoteExpiry: 0,
+          destination: null,
+        }
+        interiorWorld.entities.list.push(npc)
+        break
+      }
+    }
+  }
+}
+
+function hashString(str) {
+  let h = 0
+  for (let i = 0; i < str.length; i++) {
+    h = Math.imul(31, h) + str.charCodeAt(i) | 0
+  }
+  return h
 }
