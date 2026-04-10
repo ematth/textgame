@@ -108,7 +108,11 @@ export function drawBackgroundViewport(ctx, world, camera, viewCols, viewRows) {
       ctx.fillRect(runStartVC * cellW, yPx, runLen * cellW, cellH)
       if (runHasInk) {
         ctx.fillStyle = runFg
-        ctx.fillText(runChars.join(''), runStartVC * cellW, yPx)
+        for (let i = 0; i < runChars.length; i++) {
+          if (runChars[i] !== ' ') {
+            ctx.fillText(runChars[i], (runStartVC + i) * cellW, yPx)
+          }
+        }
       }
       runLen = 0
       runHasInk = false

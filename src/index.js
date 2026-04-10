@@ -1,4 +1,4 @@
-import { initInput, getDirection, consumeSpacePress, isSpaceDown, consumeZoomDelta, consumeMapToggle } from './input.js'
+import { initInput, getDirection, consumeSpacePress, isSpaceDown, consumeZoomDelta, consumeMapToggle, consumeBuildToggle, consumeRightClick, getMousePos, consumeClick, isMouseDown } from './input.js'
 import { generateWorld, ensureAreaLoaded, WORLD_W, WORLD_H } from './world.js'
 import { createPlayer, tryMovePlayer } from './player.js'
 import { computeCameraOrigin } from './camera.js'
@@ -6,6 +6,7 @@ import { updateEntities, entityBlocksTile, findInteractTarget } from './entities
 import {
   resizeCanvas,
   getGridDimensions,
+  getCellSize,
   getZoom,
   setZoom,
   drawBackgroundViewport,
@@ -14,7 +15,12 @@ import {
   drawNightOverlay,
   currentNightDarkness,
 } from './renderer.js'
+import { findPath } from './pathfinding.js'
 import { drawHud } from './hud.js'
+import { toggleBuildingMode, isBuildingMode, placeTile, destroyTile, getSelectedTile } from './building.js'
+import { drawBuildingGallery, drawBuildingModeIndicator, drawCursorPreview, GALLERY_PANEL_WIDTH } from './buildingUI.js'
+import { TILE_DEFS } from './tiles.js'
+import { getTile as worldGetTile } from './world.js'
 import { createWorldManager } from './worldManager.js'
 import { buildSpatialHash } from './spatialHash.js'
 import { ensureInterior } from './interiors.js'
@@ -45,7 +51,9 @@ async function boot() {
   show('Shaping the continent...', 0)
   await yieldFrame()
 
+  console.time('generateWorld')
   const { world: overworld } = generateWorld()
+  console.timeEnd('generateWorld')
   show('Shaping the continent...', 0.3)
   await yieldFrame()
 
@@ -157,6 +165,13 @@ function startGame(worldManager, overworld, initialView) {
   let mapOpen = false
   const worldMap = createWorldMap(WORLD_W, WORLD_H, overworld.seed)
 
+  /** @type {{x: number, y: number}[] | null} */
+  let movePath = null
+  let movePathIdx = 0
+  let prevHoverWx = -1
+  let prevHoverWy = -1
+  let pendingBuildClick = null
+
   window.addEventListener('resize', () => {
     view = resizeCanvas(canvas, ctx)
     grid = getGridDimensions(view.width, view.height)
@@ -177,8 +192,14 @@ function startGame(worldManager, overworld, initialView) {
     const activeWorld = worldManager.getActiveWorld()
     if (!activeWorld) { requestAnimationFrame(frame); return }
 
+    // Toggle building mode
+    if (consumeBuildToggle() && !dialogText && !mapOpen) {
+      toggleBuildingMode()
+      forceFullRedraw = true
+    }
+
     // Toggle world map
-    if (consumeMapToggle()) {
+    if (consumeMapToggle() && !isBuildingMode()) {
       mapOpen = !mapOpen
       forceFullRedraw = true
     }
@@ -223,8 +244,12 @@ function startGame(worldManager, overworld, initialView) {
         }
         forceFullRedraw = true
       }
+      consumeClick()
     } else {
       const dir = getDirection()
+
+      if (dir) movePath = null
+
       tryMovePlayer(
         player,
         dir,
@@ -233,12 +258,68 @@ function startGame(worldManager, overworld, initialView) {
         now,
       )
 
+      if (!dir && movePath && movePathIdx < movePath.length && now >= player.nextMoveAt) {
+        const step = movePath[movePathIdx]
+        const sdx = step.x - player.x
+        const sdy = step.y - player.y
+        tryMovePlayer(
+          player,
+          { dx: sdx, dy: sdy },
+          activeWorld,
+          (x, y) => entityBlocksTile(activeWorld, x, y),
+          now,
+        )
+        if (player.x === step.x && player.y === step.y) {
+          movePathIdx++
+        } else {
+          movePath = null
+        }
+      }
+      if (movePath && movePathIdx >= movePath.length) movePath = null
+
       if (player.x !== playerOldX || player.y !== playerOldY) {
         const portal = worldManager.checkPortal(activeWorld.id, player.x, player.y)
         if (portal) {
           worldManager.transition(player, portal)
+          movePath = null
           forceFullRedraw = true
         }
+      }
+
+      const click = consumeClick()
+      if (click) {
+        if (isBuildingMode()) {
+          // Building mode left-click: handled after gallery draw (see below)
+          pendingBuildClick = click
+        } else {
+          const { cellW, cellH } = getCellSize()
+          const vc = Math.floor(click.x / cellW)
+          const vr = Math.floor(click.y / cellH)
+          const twx = camera.ox + vc
+          const twy = camera.oy + vr
+          const curWorld = worldManager.getActiveWorld()
+          const path = findPath(curWorld, player.x, player.y, twx, twy, (x, y) => entityBlocksTile(curWorld, x, y))
+          if (path && path.length > 0) {
+            movePath = path
+            movePathIdx = 0
+          }
+        }
+      }
+
+      // Building mode right-click: destroy tile
+      const rclick = consumeRightClick()
+      if (rclick && isBuildingMode()) {
+        const { cellW, cellH } = getCellSize()
+        const rvc = Math.floor(rclick.x / cellW)
+        const rvr = Math.floor(rclick.y / cellH)
+        const rwx = camera.ox + rvc
+        const rwy = camera.oy + rvr
+        if (rvc >= 0 && rvr >= 0 && rclick.y > 32) {
+          destroyTile(worldManager.getActiveWorld(), rwx, rwy)
+          forceFullRedraw = true
+        }
+      } else if (rclick) {
+        // consume right-click when not in building mode (no-op)
       }
 
       if (consumeSpacePress()) {
@@ -247,6 +328,7 @@ function startGame(worldManager, overworld, initialView) {
         if (target) {
           dialogText = buildDialogText(target, now)
           dialogOpenedAt = now
+          movePath = null
           if (target.kind === 'npc') {
             target.talkingToPlayer = true
             dialogTarget = target
@@ -257,10 +339,16 @@ function startGame(worldManager, overworld, initialView) {
 
     const zd = consumeZoomDelta()
     let zoomChanged = false
+    let buildScrollDelta = 0
     if (zd !== 0) {
-      zoomChanged = setZoom(getZoom() + zd)
-      if (zoomChanged) {
-        grid = getGridDimensions(view.width, view.height)
+      const mouseNow = getMousePos()
+      if (isBuildingMode() && mouseNow.x >= 0 && mouseNow.x < GALLERY_PANEL_WIDTH && mouseNow.y >= 34) {
+        buildScrollDelta = -zd
+      } else {
+        zoomChanged = setZoom(getZoom() + zd)
+        if (zoomChanged) {
+          grid = getGridDimensions(view.width, view.height)
+        }
       }
     }
 
@@ -340,6 +428,140 @@ function startGame(worldManager, overworld, initialView) {
     const worldLabel = curWorld.isChunked ? `${curWorld.name} - ${biomeName}` : curWorld.name
     drawHud(ctx, view.width, view.height, player, worldLabel, dialogText, !!target, timeStr)
 
+    // --- Building mode gallery + placement ---
+    let galleryResult = { clickedInGallery: false, hoveredInGallery: false }
+    if (isBuildingMode()) {
+      const mouseNow = getMousePos()
+      galleryResult = drawBuildingGallery(
+        ctx, view.width, view.height,
+        mouseNow.x, mouseNow.y,
+        pendingBuildClick, null, buildScrollDelta,
+      )
+      drawBuildingModeIndicator(ctx, view.width)
+
+      // Handle world tile placement if click was not in gallery
+      if (pendingBuildClick && !galleryResult.clickedInGallery) {
+        const { cellW, cellH } = getCellSize()
+        const bvc = Math.floor(pendingBuildClick.x / cellW)
+        const bvr = Math.floor(pendingBuildClick.y / cellH)
+        if (bvc >= 0 && bvr >= 0 && pendingBuildClick.y > 32) {
+          const bwx = camera.ox + bvc
+          const bwy = camera.oy + bvr
+          placeTile(curWorld, bwx, bwy)
+          forceFullRedraw = true
+        }
+      }
+      pendingBuildClick = null
+
+      // Drag-to-place: continuously place tiles while mouse is held down
+      if (isMouseDown() && getSelectedTile() >= 0 && !galleryResult.hoveredInGallery) {
+        const mouseNow = getMousePos()
+        if (mouseNow.x >= 0 && mouseNow.y > 32) {
+          const { cellW, cellH } = getCellSize()
+          const dvc = Math.floor(mouseNow.x / cellW)
+          const dvr = Math.floor(mouseNow.y / cellH)
+          const dwx = camera.ox + dvc
+          const dwy = camera.oy + dvr
+          const currentTile = worldGetTile(curWorld, dwx, dwy)
+          if (currentTile !== getSelectedTile()) {
+            placeTile(curWorld, dwx, dwy)
+            forceFullRedraw = true
+          }
+        }
+      }
+    }
+
+    // --- Hover highlight + tooltip ---
+    const mouse = getMousePos()
+    if (mouse.x >= 0 && mouse.y >= 0) {
+      const { cellW, cellH } = getCellSize()
+      const hvc = Math.floor(mouse.x / cellW)
+      const hvr = Math.floor(mouse.y / cellH)
+      const hwx = camera.ox + hvc
+      const hwy = camera.oy + hvr
+
+      if (hwx !== prevHoverWx || hwy !== prevHoverWy) forceFullRedraw = true
+      prevHoverWx = hwx
+      prevHoverWy = hwy
+
+      if (hvc >= 0 && hvc < grid.cols && hvr >= 0 && hvr < grid.rows && mouse.y > 32 && !galleryResult.hoveredInGallery) {
+        // Building cursor preview
+        if (isBuildingMode()) {
+          drawCursorPreview(ctx, cellW, cellH, hvc, hvr, grid.cols, grid.rows)
+        } else {
+          ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)'
+          ctx.lineWidth = 1
+          ctx.strokeRect(hvc * cellW + 0.5, hvr * cellH + 0.5, cellW - 1, cellH - 1)
+        }
+
+        const entities = curWorld.spatialHash ? curWorld.spatialHash.getAt(hwx, hwy) : []
+        const npc = entities.find(e => e.kind === 'npc' && e.alive)
+        const obj = entities.find(e => e.kind === 'object')
+        const hoveredEntity = npc || obj
+
+        let tooltipLines = []
+        if (hoveredEntity) {
+          if (hoveredEntity.kind === 'npc') {
+            tooltipLines.push(`${hoveredEntity.name} (${hoveredEntity.race} ${hoveredEntity.role})`)
+            tooltipLines.push(`HP: ${hoveredEntity.hp}/${hoveredEntity.maxHp}  ${hoveredEntity.faction.replace('_', ' ')}`)
+            tooltipLines.push(`Mood: ${hoveredEntity.mood}`)
+          } else {
+            tooltipLines.push(hoveredEntity.label || hoveredEntity.char)
+          }
+        } else {
+          const tileId = worldGetTile(curWorld, hwx, hwy)
+          const td = TILE_DEFS[tileId] ?? TILE_DEFS[0]
+          if (td.name) {
+            tooltipLines.push(`${td.char} ${td.name} (${hwx}, ${hwy})`)
+          } else if (td.char.trim()) {
+            tooltipLines.push(`${td.char} (${hwx}, ${hwy})`)
+          }
+        }
+
+        if (tooltipLines.length > 0) {
+          const tooltipFont = '12px "Courier New", monospace'
+          ctx.font = tooltipFont
+          const lineH = 16
+          const pad = 6
+          let maxW = 0
+          for (const line of tooltipLines) {
+            const w = ctx.measureText(line).width
+            if (w > maxW) maxW = w
+          }
+          const boxW = maxW + pad * 2
+          const boxH = tooltipLines.length * lineH + pad * 2
+          let tx = mouse.x + 16
+          let ty = mouse.y - boxH - 4
+          if (tx + boxW > view.width) tx = mouse.x - boxW - 4
+          if (ty < 34) ty = mouse.y + 20
+
+          ctx.fillStyle = 'rgba(15, 23, 42, 0.9)'
+          ctx.fillRect(tx, ty, boxW, boxH)
+          ctx.strokeStyle = '#475569'
+          ctx.strokeRect(tx + 0.5, ty + 0.5, boxW - 1, boxH - 1)
+          ctx.fillStyle = '#e2e8f0'
+          ctx.font = tooltipFont
+          ctx.textBaseline = 'top'
+          for (let i = 0; i < tooltipLines.length; i++) {
+            ctx.fillText(tooltipLines[i], tx + pad, ty + pad + i * lineH)
+          }
+        }
+      }
+    }
+
+    // --- Path preview dots ---
+    if (movePath && movePathIdx < movePath.length) {
+      const { cellW, cellH } = getCellSize()
+      ctx.fillStyle = 'rgba(134, 239, 172, 0.35)'
+      for (let i = movePathIdx; i < movePath.length; i++) {
+        const pvc = movePath[i].x - camera.ox
+        const pvr = movePath[i].y - camera.oy
+        if (pvc >= 0 && pvc < grid.cols && pvr >= 0 && pvr < grid.rows) {
+          ctx.fillRect(pvc * cellW + cellW * 0.3, pvr * cellH + cellH * 0.3, cellW * 0.4, cellH * 0.4)
+        }
+      }
+    }
+
     requestAnimationFrame(frame)
   }
 
@@ -385,4 +607,18 @@ function buildDialogText(target, now) {
   return text
 }
 
-boot()
+boot().catch(err => {
+  console.error('Boot failed:', err)
+  const c = document.getElementById('game')
+  if (c) {
+    const x = c.getContext('2d')
+    if (x) {
+      x.fillStyle = '#000'
+      x.fillRect(0, 0, c.width, c.height)
+      x.fillStyle = '#f44'
+      x.font = '16px monospace'
+      x.fillText('Boot error: ' + err.message, 20, 40)
+      x.fillText(String(err.stack).split('\n').slice(0, 5).join(' | '), 20, 70)
+    }
+  }
+})

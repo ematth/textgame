@@ -45,6 +45,7 @@ export function generateWorld() {
     seed: WORLD_SEED,
     tiles: null, // no flat array - uses chunks
     chunkCache,
+    tileOverrides: new Map(),
     portals: [],
     entities: { list: [] },
     spatialHash: null,
@@ -87,10 +88,30 @@ export function ensureAreaLoaded(world, x, y, radius) {
 
 export function getTile(world, x, y) {
   if (x < 0 || x >= world.width || y < 0 || y >= world.height) return TILE.MOUNTAIN
+  const key = y * world.width + x
+  if (world.tileOverrides && world.tileOverrides.has(key)) {
+    return world.tileOverrides.get(key)
+  }
   if (world.isChunked) {
     return chunkGetTile(world.chunkCache, x, y, world.width, world.height)
   }
   return world.tiles[y * world.width + x]
+}
+
+export function setTile(world, x, y, tileId) {
+  if (x < 0 || x >= world.width || y < 0 || y >= world.height) return
+  const key = y * world.width + x
+  if (!world.tileOverrides) world.tileOverrides = new Map()
+  world.tileOverrides.set(key, tileId)
+  // Also write to chunk if loaded for consistency
+  if (world.isChunked) {
+    const cx = x >> CHUNK_BITS
+    const cy = y >> CHUNK_BITS
+    const chunk = world.chunkCache.getIfLoaded(cx, cy)
+    if (chunk) {
+      chunk.tiles[(y & CHUNK_MASK) * CHUNK_SIZE + (x & CHUNK_MASK)] = tileId
+    }
+  }
 }
 
 export function isSolid(world, x, y) {
